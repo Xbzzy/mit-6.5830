@@ -2,7 +2,10 @@ package godb
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"strconv"
 	"strings"
@@ -13,36 +16,52 @@ import (
 // HeapFile is a public class because external callers may wish to instantiate
 // database tables using the method [LoadFromCSV]
 type HeapFile struct {
-	// TODO: some code goes here
 	// HeapFile should include the fields below;  you may want to add
 	// additional fields
-	bufPool *BufferPool
+	fromFile  string
+	desc      *TupleDesc
+	bufPool   *BufferPool
+	pageCount int
 }
 
-// Create a HeapFile.
+// NewHeapFile Create a HeapFile.
 // Parameters
 // - fromFile: backing file for the HeapFile.  May be empty or a previously created heap file.
 // - td: the TupleDesc for the HeapFile.
 // - bp: the BufferPool that is used to store pages read from the HeapFile
 // May return an error if the file cannot be opened or created.
-func NewHeapFile(fromFile string, td *TupleDesc, bp *BufferPool) (*HeapFile, error) {
-	// TODO: some code goes here
-	return &HeapFile{}, fmt.Errorf("NewHeapFile not implemented") //replace me
+func NewHeapFile(fromFile string, td *TupleDesc, bp *BufferPool) (heapFile *HeapFile, err error) {
+	heapFile = &HeapFile{
+		fromFile: fromFile,
+		desc:     td,
+		bufPool:  bp,
+	}
+
+	heapFile.pageCount = heapFile.NumPages()
+	return
 }
 
-// Return the name of the backing file
+// BackingFile Return the name of the backing file
 func (f *HeapFile) BackingFile() string {
-	// TODO: some code goes here
-	return "" //replace me
+	return f.fromFile
 }
 
-// Return the number of pages in the heap file
+// NumPages Return the number of pages in the heap file
 func (f *HeapFile) NumPages() int {
-	// TODO: some code goes here
-	return 0 //replace me
+	fileInfo, err := os.Stat(f.fromFile)
+	if err != nil {
+		DPrintf("HeapFile path:%s NumPages Stat path:%s err:%v", f.fromFile, f.fromFile, err)
+		return 0
+	}
+
+	num := int(fileInfo.Size() / int64(PageSize))
+	if fileInfo.Size()%int64(PageSize) != 0 {
+		num++
+	}
+	return num
 }
 
-// Load the contents of a heap file from a specified CSV file.  Parameters are as follows:
+// LoadFromCSV Load the contents of a heap file from a specified CSV file.  Parameters are as follows:
 // - hasHeader:  whether or not the CSV file has a header
 // - sep: the character to use to separate fields
 // - skipLastField: if true, the final field is skipped (some TPC datasets include a trailing separator on each line)
@@ -58,6 +77,7 @@ func (f *HeapFile) LoadFromCSV(file *os.File, hasHeader bool, sep string, skipLa
 		if skipLastField {
 			fields = fields[0 : len(fields)-1]
 		}
+
 		numFields := len(fields)
 		cnt++
 		desc := f.Descriptor()
@@ -70,6 +90,7 @@ func (f *HeapFile) LoadFromCSV(file *os.File, hasHeader bool, sep string, skipLa
 		if cnt == 1 && hasHeader {
 			continue
 		}
+
 		var newFields []DBValue
 		for fno, field := range fields {
 			switch f.Descriptor().Fields[fno].Ftype {
@@ -88,6 +109,7 @@ func (f *HeapFile) LoadFromCSV(file *os.File, hasHeader bool, sep string, skipLa
 				newFields = append(newFields, StringField{field})
 			}
 		}
+
 		newT := Tuple{*f.Descriptor(), newFields, nil}
 		tid := NewTID()
 		bp := f.bufPool
@@ -109,8 +131,44 @@ func (f *HeapFile) LoadFromCSV(file *os.File, hasHeader bool, sep string, skipLa
 // the appropriate offset, read the bytes in, and construct a [heapPage] object,
 // using the [heapPage.initFromBuffer] method.
 func (f *HeapFile) readPage(pageNo int) (Page, error) {
-	// TODO: some code goes here
-	return nil, fmt.Errorf("readPage not implemented")
+	file, err := os.OpenFile(f.fromFile, os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		DPrintf("HeapFile path:%s readPage OpenFile path:%s err:%v", f.fromFile, f.fromFile, err)
+		return nil, err
+	}
+
+	_, err = file.Seek(int64(pageNo*PageSize), io.SeekStart)
+	if err != nil {
+		DPrintf("HeapFile path:%s readPage Seek err:%v", f.fromFile, err)
+		return nil, err
+	}
+
+	data := make([]byte, PageSize)
+	_, err = file.Read(data)
+	if err != nil {
+		DPrintf("HeapFile path:%s readPage Read err:%v", f.fromFile, err)
+		return nil, err
+	}
+
+	buf := new(bytes.Buffer)
+	err = binary.Write(buf, binary.LittleEndian, data)
+	if err != nil {
+		DPrintf("HeapFile path:%s readPage Write err:%v", f.fromFile, err)
+		return nil, err
+	}
+
+	hp := &heapPage{
+		pageNo: pageNo,
+		desc:   f.desc,
+		file:   f,
+	}
+	err = hp.initFromBuffer(buf)
+	if err != nil {
+		DPrintf("HeapFile path:%s readPage initFromBuffer err:%v", f.fromFile, err)
+		return nil, err
+	}
+
+	return hp, nil
 }
 
 // Add the tuple to the HeapFile. This method should search through pages in the
@@ -127,9 +185,61 @@ func (f *HeapFile) readPage(pageNo int) (Page, error) {
 // add support for concurrent modifications in lab 3.
 //
 // The page the tuple is inserted into should be marked as dirty.
-func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
-	// TODO: some code goes here
-	return fmt.Errorf("insertTuple not implemented") //replace me
+func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) (err error) {
+	var (
+		reply     Page
+		tmpPage   *heapPage
+		validPage *heapPage
+	)
+	for i := 0; i < f.pageCount; i++ {
+		reply, err = f.bufPool.GetPage(f, i, tid, WritePerm)
+		if err != nil {
+			DPrintf("HeapFile path:%s insertTuple GetPage err:%v", f.fromFile, err)
+			return
+		}
+
+		tmpPage = reply.(*heapPage)
+		if tmpPage.slotUsed < tmpPage.slotCount {
+			// slot not full
+			validPage = tmpPage
+			break
+		}
+	}
+
+	if validPage == nil {
+		DPrintf("HeapFile path:%s insertTuple valid nil, new page", f.fromFile)
+		validPage, err = newHeapPage(f.desc, f.pageCount, f)
+		if err != nil {
+			DPrintf("HeapFile path:%s insertTuple newHeapPage err:%v", f.fromFile, err)
+			return
+		}
+
+		_, err = validPage.insertTuple(t)
+		if err != nil {
+			DPrintf("HeapFile path:%s page insertTuple err:%v", f.fromFile, err)
+			return
+		}
+
+		err = f.flushPage(validPage)
+		if err != nil {
+			DPrintf("HeapFile path:%s page flushPage err:%v", f.fromFile, err)
+			return
+		}
+
+		if len(f.bufPool.Pages) < f.bufPool.PageNum {
+			f.bufPool.Pages[f.pageKey(f.pageCount)] = validPage
+		}
+		f.pageCount++
+		return
+	}
+
+	_, err = validPage.insertTuple(t)
+	if err != nil {
+		DPrintf("HeapFile path:%s page insertTuple err:%v", f.fromFile, err)
+		return
+	}
+	validPage.setDirty(tid, true)
+	return
 }
 
 // Remove the provided tuple from the HeapFile.
@@ -141,9 +251,22 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) error {
 // to identify the heap page and slot within the page that the tuple came from.
 //
 // The page the tuple is deleted from should be marked as dirty.
-func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) error {
-	// TODO: some code goes here
-	return fmt.Errorf("deleteTuple not implemented") //replace me
+func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) (err error) {
+	pageNo, _ := splitRecordID(t.Rid)
+	tmpPage, err := f.bufPool.GetPage(f, pageNo, tid, WritePerm)
+	if err != nil {
+		DPrintf("HeapFile path:%s deleteTuple readPage err:%v", f.fromFile, err)
+		return
+	}
+
+	page := tmpPage.(*heapPage)
+	err = page.deleteTuple(t.Rid)
+	if err != nil {
+		DPrintf("HeapFile path:%s page deleteTuple err:%v", f.fromFile, err)
+		return
+	}
+
+	return
 }
 
 // Method to force the specified page back to the backing file at the
@@ -151,20 +274,44 @@ func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) error {
 // evict a page. The Page object should store information about its offset on
 // disk (e.g., that it is the ith page in the heap file), so you can determine
 // where to write it back.
-func (f *HeapFile) flushPage(p Page) error {
-	// TODO: some code goes here
-	return fmt.Errorf("flushPage not implemented") //replace me
+func (f *HeapFile) flushPage(p Page) (err error) {
+	file, err := os.OpenFile(f.fromFile, os.O_CREATE|os.O_RDWR, 0666)
+	if err != nil {
+		DPrintf("HeapFile path:%s flushPage OpenFile err:%v", f.fromFile, err)
+		return
+	}
+	defer file.Close()
+
+	page := p.(*heapPage)
+	_, err = file.Seek(int64(page.pageNo*PageSize), io.SeekStart)
+	if err != nil {
+		DPrintf("HeapFile path:%s flushPage Seek err:%v", f.fromFile, err)
+		return
+	}
+
+	buf, err := page.toBuffer()
+	if err != nil {
+		DPrintf("HeapFile path:%s flushPage ToBuffer err:%v", f.fromFile, err)
+		return
+	}
+
+	_, err = buf.WriteTo(file)
+	if err != nil {
+		DPrintf("HeapFile path:%s flushPage WriteTo err:%v", f.fromFile, err)
+		return
+	}
+
+	page.dirty = false
+	return
 }
 
-// [Operator] descriptor method -- return the TupleDesc for this HeapFile
+// Descriptor method -- return the TupleDesc for this HeapFile
 // Supplied as argument to NewHeapFile.
 func (f *HeapFile) Descriptor() *TupleDesc {
-	// TODO: some code goes here
-	return nil //replace me
-
+	return f.desc
 }
 
-// [Operator] iterator method
+// Iterator method
 // Return a function that iterates through the records in the heap file
 // Note that this method should read pages from the HeapFile using the
 // BufferPool method GetPage, rather than reading pages directly,
@@ -173,9 +320,37 @@ func (f *HeapFile) Descriptor() *TupleDesc {
 // You should esnure that Tuples returned by this method have their Rid object
 // set appropriate so that [deleteTuple] will work (see additional comments there).
 func (f *HeapFile) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
-	// TODO: some code goes here
-	return func() (*Tuple, error) {
-	return nil, fmt.Errorf("heap_file.Iterator not implemented")
+	var iterIndex int
+	tupleIterMap := make(map[int]func() (*Tuple, error))
+	return func() (tuple *Tuple, err error) {
+		var (
+			tmpPage Page
+			page    *heapPage
+			i       int
+		)
+		for i = iterIndex; i < f.pageCount; i++ {
+			tmpPage, err = f.bufPool.GetPage(f, i, tid, ReadPerm)
+			if err != nil {
+				DPrintf("HeapFile path:%s Iterator GetPage err:%v", f.fromFile, err)
+				return
+			}
+
+			page = tmpPage.(*heapPage)
+
+			if tupleIterMap[i] == nil {
+				tupleIterMap[i] = page.tupleIter()
+			}
+
+			tuple, err = tupleIterMap[i]()
+			if tuple == nil {
+				iterIndex++
+				continue
+			}
+
+			return
+		}
+
+		return
 	}, nil
 }
 
@@ -190,6 +365,8 @@ type heapHash struct {
 // heapHash struct as the key for a page, although you can use any struct that
 // does not contain a slice or a map that uniquely identifies the page.
 func (f *HeapFile) pageKey(pgNo int) any {
-	// TODO: some code goes here
-	return nil
+	return heapHash{
+		FileName: f.fromFile,
+		PageNo:   pgNo,
+	}
 }

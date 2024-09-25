@@ -5,10 +5,10 @@ package godb
 
 import (
 	"bytes"
+	"encoding/binary"
 	"fmt"
 	"strconv"
 	"strings"
-
 )
 
 // DBType is the type of a tuple field, in GoDB, e.g., IntType or StringType
@@ -47,10 +47,17 @@ type TupleDesc struct {
 // Compare two tuple descs, and return true iff
 // all of their field objects are equal and they
 // are the same length
-func (d1 *TupleDesc) equals(d2 *TupleDesc) bool {
-	// TODO: some code goes here
-	return true
+func (td *TupleDesc) equals(d2 *TupleDesc) bool {
+	if len(td.Fields) != len(d2.Fields) {
+		return false
+	}
 
+	for index, field := range td.Fields {
+		if field != d2.Fields[index] {
+			return false
+		}
+	}
+	return true
 }
 
 // Given a FieldType f and a TupleDesc desc, find the best
@@ -82,9 +89,10 @@ func findFieldInTd(field FieldType, desc *TupleDesc) (int, error) {
 // Make a copy of a tuple desc.  Note that in go, assignment of a slice to
 // another slice object does not make a copy of the contents of the slice.
 // Look at the built-in function "copy".
-func (td *TupleDesc) copy() *TupleDesc {
-	// TODO: some code goes here
-	return &TupleDesc{} //replace me
+func (td *TupleDesc) copy() (reply *TupleDesc) {
+	reply = &TupleDesc{make([]FieldType, len(td.Fields))}
+	copy(reply.Fields, td.Fields)
+	return
 }
 
 // Assign the TableQualifier of every field in the TupleDesc to be the
@@ -102,9 +110,11 @@ func (td *TupleDesc) setTableAlias(alias string) {
 // Merge two TupleDescs together.  The resulting TupleDesc
 // should consist of the fields of desc2
 // appended onto the fields of desc.
-func (desc *TupleDesc) merge(desc2 *TupleDesc) *TupleDesc {
-	// TODO: some code goes here
-	return &TupleDesc{}  //replace me
+func (td *TupleDesc) merge(desc2 *TupleDesc) (reply *TupleDesc) {
+	reply = &TupleDesc{
+		Fields: append(td.Fields, desc2.Fields...),
+	}
+	return
 }
 
 // ================== Tuple Methods ======================
@@ -135,6 +145,18 @@ type Tuple struct {
 type recordID interface {
 }
 
+func getRecordID(pageNo, slot int) recordID {
+	return fmt.Sprintf("%d-%d", pageNo, slot)
+}
+
+func splitRecordID(id recordID) (pageNo, slot int) {
+	str := id.(string)
+	strSlice := strings.Split(str, "-")
+	pageNo, _ = strconv.Atoi(strSlice[0])
+	slot, _ = strconv.Atoi(strSlice[1])
+	return
+}
+
 // Serialize the contents of the tuple into a byte array Since all tuples are of
 // fixed size, this method should simply write the fields in sequential order
 // into the supplied buffer.
@@ -149,9 +171,32 @@ type recordID interface {
 //
 // May return an error if the buffer has insufficient capacity to store the
 // tuple.
-func (t *Tuple) writeTo(b *bytes.Buffer) error {
-	// TODO: some code goes here
-	return fmt.Errorf("writeTo not implemented") //replace me
+func (t *Tuple) writeTo(b *bytes.Buffer) (err error) {
+	for index, fieldType := range t.Desc.Fields {
+		switch fieldType.Ftype {
+		case IntType:
+			filed := t.Fields[index].(IntField)
+			err = binary.Write(b, binary.LittleEndian, filed.Value)
+
+		case StringType:
+			filed := t.Fields[index].(StringField)
+			tmpStr := filed.Value
+			if len(tmpStr) < StringLength {
+				tmpStr += strings.Repeat(" ", StringLength-len(filed.Value))
+			}
+			err = binary.Write(b, binary.LittleEndian, []byte(tmpStr))
+
+		default:
+			continue
+		}
+
+		if err != nil {
+			DPrintf("Tuple writeTo buf err:%v", err)
+			return err
+		}
+	}
+
+	return
 }
 
 // Read the contents of a tuple with the specified [TupleDesc] from the
@@ -165,19 +210,71 @@ func (t *Tuple) writeTo(b *bytes.Buffer) error {
 // trailing zeros should be removed from the strings.  A []byte can be cast
 // directly to string.
 //
-// May return an error if the buffer has insufficent data to deserialize the
+// May return an error if the buffer has insufficent tuples to deserialize the
 // tuple.
-func readTupleFrom(b *bytes.Buffer, desc *TupleDesc) (*Tuple, error) {
-	// TODO: some code goes here
-	return nil, fmt.Errorf("readTupleFrom not implemented") //replace me
+func readTupleFrom(b *bytes.Buffer, desc *TupleDesc) (reply *Tuple, err error) {
+	replyTuple := &Tuple{
+		Desc:   *desc,
+		Fields: make([]DBValue, 0, len(desc.Fields)),
+		Rid:    nil,
+	}
+
+	for _, filedDesc := range desc.Fields {
+		switch filedDesc.Ftype {
+		case IntType:
+			var tmpInt64 int64
+			err = binary.Read(b, binary.LittleEndian, &tmpInt64)
+			if err != nil {
+				DPrintf("readTupleFrom read int err:%v", err)
+				return
+			}
+
+			replyTuple.Fields = append(replyTuple.Fields, IntField{tmpInt64})
+		case StringType:
+			tmpBytes := make([]byte, StringLength)
+			err = binary.Read(b, binary.LittleEndian, tmpBytes)
+			if err != nil {
+				DPrintf("readTupleFrom read string err:%v", err)
+				return
+			}
+
+			replyTuple.Fields = append(replyTuple.Fields, StringField{strings.TrimSpace(string(tmpBytes))})
+		default:
+			continue
+		}
+
+	}
+
+	return replyTuple, nil
 }
 
 // Compare two tuples for equality.  Equality means that the TupleDescs are equal
 // and all of the fields are equal.  TupleDescs should be compared with
 // the [TupleDesc.equals] method, but fields can be compared directly with equality
 // operators.
-func (t1 *Tuple) equals(t2 *Tuple) bool {
-	// TODO: some code goes here
+func (t *Tuple) equals(t2 *Tuple) bool {
+	if t == nil && t2 == nil {
+		return true
+	}
+
+	if t == nil || t2 == nil {
+		return false
+	}
+
+	if !t.Desc.equals(&t2.Desc) {
+		return false
+	}
+
+	if len(t.Fields) != len(t2.Fields) {
+		return false
+	}
+
+	for index, field := range t.Fields {
+		if !field.EvalPred(t2.Fields[index], OpEq) {
+			return false
+		}
+	}
+
 	return true
 }
 
@@ -185,8 +282,18 @@ func (t1 *Tuple) equals(t2 *Tuple) bool {
 // appended to t1. The new tuple should have a correct TupleDesc that is created
 // by merging the descriptions of the two input tuples.
 func joinTuples(t1 *Tuple, t2 *Tuple) *Tuple {
-	// TODO: some code goes here
-	return &Tuple{}
+	if t1 == nil {
+		return t2
+	}
+	if t2 == nil {
+		return t1
+	}
+
+	return &Tuple{
+		Desc:   *t1.Desc.merge(&t2.Desc),
+		Fields: append(t1.Fields, t2.Fields...),
+		Rid:    nil,
+	}
 }
 
 type orderByState int
@@ -211,9 +318,30 @@ const (
 //
 // Note that EvalExpr uses the [Tuple.project] method, so you will need
 // to implement projection before testing compareField.
-func (t *Tuple) compareField(t2 *Tuple, field Expr) (orderByState, error) {
-	// TODO: some code goes here
-	return OrderedEqual, fmt.Errorf("compareField not implemented") // replace me
+func (t *Tuple) compareField(t2 *Tuple, field Expr) (state orderByState, err error) {
+	value, err := field.EvalExpr(t)
+	if err != nil {
+		DPrintf("Tuple compareField EvalExpr err:%v", err)
+		return
+	}
+
+	value2, err := field.EvalExpr(t2)
+	if err != nil {
+		DPrintf("Tuple compareField EvalExpr err:%v", err)
+		return
+	}
+
+	if value.EvalPred(value2, OpEq) {
+		state = OrderedEqual
+		return
+	}
+
+	if value.EvalPred(value2, OpLt) {
+		state = OrderedLessThan
+		return
+	}
+
+	return OrderedGreaterThan, nil
 }
 
 // Project out the supplied fields from the tuple. Should return a new Tuple
@@ -222,9 +350,23 @@ func (t *Tuple) compareField(t2 *Tuple, field Expr) (orderByState, error) {
 // Should not require a match on TableQualifier, but should prefer fields that
 // do match on TableQualifier (e.g., a field  t1.name in fields should match an
 // entry t2.name in t, but only if there is not an entry t1.name in t)
-func (t *Tuple) project(fields []FieldType) (*Tuple, error) {
-	// TODO: some code goes here
-	return nil, fmt.Errorf("project not implemented")  //replace me
+func (t *Tuple) project(fields []FieldType) (reply *Tuple, err error) {
+	var target int
+	reply = &Tuple{
+		Desc:   TupleDesc{Fields: fields},
+		Fields: make([]DBValue, 0, len(fields)),
+		Rid:    t.Rid,
+	}
+	for _, field := range fields {
+		target, err = findFieldInTd(field, &t.Desc)
+		if err != nil {
+			DPrintf("Tuple project findFieldInTd err:%v", err)
+			return
+		}
+
+		reply.Fields = append(reply.Fields, t.Fields[target])
+	}
+	return
 }
 
 // Compute a key for the tuple to be used in a map structure
@@ -253,16 +395,16 @@ func fmtCol(v string, ncols int) string {
 // supplied TupleDesc.
 //
 // Aligned indicates if the tuple should be foramtted in a tabular format
-func (d *TupleDesc) HeaderString(aligned bool) string {
+func (td *TupleDesc) HeaderString(aligned bool) string {
 	outstr := ""
-	for i, f := range d.Fields {
+	for i, f := range td.Fields {
 		tableName := ""
 		if f.TableQualifier != "" {
 			tableName = f.TableQualifier + "."
 		}
 
 		if aligned {
-			outstr = fmt.Sprintf("%s %s", outstr, fmtCol(tableName+f.Fname, len(d.Fields)))
+			outstr = fmt.Sprintf("%s %s", outstr, fmtCol(tableName+f.Fname, len(td.Fields)))
 		} else {
 			sep := ","
 			if i == 0 {

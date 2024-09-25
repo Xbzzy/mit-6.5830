@@ -7,6 +7,8 @@ import (
 )
 
 func TestLab1Query(t *testing.T) {
+	_ = os.Remove("test")
+
 	if os.Getenv("LAB") == "5" {
 		t.Skip("This test is only valid up to Lab 4. Skipping")
 	}
@@ -24,4 +26,6 @@ func TestLab1Query(t *testing.T) {
 	if sum != 1111 {
 		t.Fatalf("expected sum of 1111, got %d", sum)
 	}
+
+	_ = os.Remove("test")
 }

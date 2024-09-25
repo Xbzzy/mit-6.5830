@@ -7,9 +7,10 @@ package godb
 
 import (
 	"fmt"
+	"sync"
 )
 
-// Permissions used to when reading / locking pages
+// RWPerm Permissions used to when reading / locking pages
 type RWPerm int
 
 const (
@@ -18,29 +19,52 @@ const (
 )
 
 type BufferPool struct {
-	// TODO: some code goes here
+	sync.RWMutex
+	PageNum int
+	Pages   map[any]Page
 }
 
-// Create a new BufferPool with the specified number of pages
-func NewBufferPool(numPages int) (*BufferPool, error) {
-	return &BufferPool{}, fmt.Errorf("NewBufferPool not implemented")
+// NewBufferPool Create a new BufferPool with the specified number of pages
+func NewBufferPool(numPages int) (buf *BufferPool, err error) {
+	buf = &BufferPool{
+		PageNum: numPages,
+		Pages:   make(map[any]Page),
+	}
+	return
 }
 
-// Testing method -- iterate through all pages in the buffer pool
+// FlushAllPages Testing method -- iterate through all pages in the buffer pool
 // and flush them using [DBFile.flushPage]. Does not need to be thread/transaction safe.
 // Mark pages as not dirty after flushing them.
 func (bp *BufferPool) FlushAllPages() {
-	// TODO: some code goes here
+	bp.Lock()
+	defer bp.Unlock()
+
+	var err error
+	for _, page := range bp.Pages {
+		if !page.isDirty() {
+			continue
+		}
+
+		err = page.getFile().flushPage(page)
+		if err != nil {
+			DPrintf("BufferPool flushPage err:%v", err)
+			return
+		}
+
+		// TODO
+		page.setDirty(0, false)
+	}
 }
 
-// Abort the transaction, releasing locks. Because GoDB is FORCE/NO STEAL, none
+// AbortTransaction Abort the transaction, releasing locks. Because GoDB is FORCE/NO STEAL, none
 // of the pages tid has dirtied will be on disk so it is sufficient to just
 // release locks to abort. You do not need to implement this for lab 1.
 func (bp *BufferPool) AbortTransaction(tid TransactionID) {
 	// TODO: some code goes here
 }
 
-// Commit the transaction, releasing locks. Because GoDB is FORCE/NO STEAL, none
+// CommitTransaction Commit the transaction, releasing locks. Because GoDB is FORCE/NO STEAL, none
 // of the pages tid has dirtied will be on disk, so prior to releasing locks you
 // should iterate through pages and write them to disk.  In GoDB lab3 we assume
 // that the system will not crash while doing this, allowing us to avoid using a
@@ -49,7 +73,7 @@ func (bp *BufferPool) CommitTransaction(tid TransactionID) {
 	// TODO: some code goes here
 }
 
-// Begin a new transaction. You do not need to implement this for lab 1.
+// BeginTransaction Begin a new transaction. You do not need to implement this for lab 1.
 //
 // Returns an error if the transaction is already running.
 func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
@@ -57,7 +81,7 @@ func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
 	return nil
 }
 
-// Retrieve the specified page from the specified DBFile (e.g., a HeapFile), on
+// GetPage Retrieve the specified page from the specified DBFile (e.g., a HeapFile), on
 // behalf of the specified transaction. If a page is not cached in the buffer pool,
 // you can read it from disk uing [DBFile.readPage]. If the buffer pool is full (i.e.,
 // already stores numPages pages), a page should be evicted.  Should not evict
@@ -69,5 +93,47 @@ func (bp *BufferPool) BeginTransaction(tid TransactionID) error {
 // implement locking or deadlock detection. You will likely want to store a list
 // of pages in the BufferPool in a map keyed by the [DBFile.pageKey].
 func (bp *BufferPool) GetPage(file DBFile, pageNo int, tid TransactionID, perm RWPerm) (Page, error) {
-	return nil, fmt.Errorf("GetPage not implemented")
+	switch perm {
+	case ReadPerm:
+		bp.RLock()
+		defer bp.RUnlock()
+	case WritePerm:
+		bp.Lock()
+		defer bp.Unlock()
+	default:
+		return nil, fmt.Errorf("unknown permission")
+	}
+
+	pageKey := file.pageKey(pageNo)
+	if page, ok := bp.Pages[pageKey]; ok {
+		return page, nil
+	}
+
+	// page full, find a not dirty page and remove it
+	if len(bp.Pages) >= bp.PageNum {
+		var found bool
+		for key, page := range bp.Pages {
+			if page.isDirty() {
+				continue
+			}
+
+			found = true
+			delete(bp.Pages, key)
+			break
+		}
+
+		if !found {
+			DPrintf("BufferPool GetPage not found non-dirty page")
+			return nil, GoDBError{BufferPoolFullError, "buffer pool all dirty"}
+		}
+	}
+
+	page, err := file.readPage(pageNo)
+	if err != nil {
+		DPrintf("BufferPool GetPage readPage:%d err:%v", pageNo, err)
+		return nil, err
+	}
+
+	bp.Pages[pageKey] = page
+	return page, nil
 }
