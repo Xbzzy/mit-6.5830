@@ -21,6 +21,7 @@ type HeapFile struct {
 	fromFile  string
 	desc      *TupleDesc
 	bufPool   *BufferPool
+	idlePage  map[int]struct{}
 	pageCount int
 }
 
@@ -35,6 +36,7 @@ func NewHeapFile(fromFile string, td *TupleDesc, bp *BufferPool) (heapFile *Heap
 		fromFile: fromFile,
 		desc:     td,
 		bufPool:  bp,
+		idlePage: make(map[int]struct{}),
 	}
 
 	heapFile.pageCount = heapFile.NumPages()
@@ -191,19 +193,22 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) (err error) {
 		tmpPage   *heapPage
 		validPage *heapPage
 	)
-	for i := 0; i < f.pageCount; i++ {
-		reply, err = f.bufPool.GetPage(f, i, tid, WritePerm)
+	for pageNo := range f.idlePage {
+		reply, err = f.bufPool.GetPage(f, pageNo, tid, WritePerm)
 		if err != nil {
 			DPrintf("HeapFile path:%s insertTuple GetPage err:%v", f.fromFile, err)
 			return
 		}
 
 		tmpPage = reply.(*heapPage)
-		if tmpPage.slotUsed < tmpPage.slotCount {
-			// slot not full
-			validPage = tmpPage
-			break
+		if tmpPage.slotUsed >= tmpPage.slotCount {
+			delete(f.idlePage, tmpPage.pageNo)
+			continue
 		}
+
+		// slot not full
+		validPage = tmpPage
+		break
 	}
 
 	if validPage == nil {
@@ -229,6 +234,8 @@ func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) (err error) {
 		if len(f.bufPool.Pages) < f.bufPool.PageNum {
 			f.bufPool.Pages[f.pageKey(f.pageCount)] = validPage
 		}
+
+		f.idlePage[f.pageCount] = struct{}{}
 		f.pageCount++
 		return
 	}
@@ -266,6 +273,7 @@ func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) (err error) {
 		return
 	}
 
+	f.idlePage[pageNo] = struct{}{}
 	return
 }
 

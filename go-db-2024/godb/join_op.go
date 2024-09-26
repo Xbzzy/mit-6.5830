@@ -1,9 +1,5 @@
 package godb
 
-import (
-	"fmt"
-)
-
 type EqualityJoin struct {
 	// Expressions that when applied to tuples from the left or right operators,
 	// respectively, return the value of the left or right side of the join
@@ -16,23 +12,31 @@ type EqualityJoin struct {
 	maxBufferSize int
 }
 
-// Constructor for a join of integer expressions.
+// NewJoin Constructor for a join of integer expressions.
 //
 // Returns an error if either the left or right expression is not an integer.
 func NewJoin(left Operator, leftField Expr, right Operator, rightField Expr, maxBufferSize int) (*EqualityJoin, error) {
+	if leftField == nil || rightField == nil {
+		return nil, GoDBError{TypeMismatchError, "leftField and rightField must be non-nil"}
+	}
+	if leftField.GetExprType().Ftype != IntType || rightField.GetExprType().Ftype != IntType {
+		return nil, GoDBError{TypeMismatchError, "leftField and rightField must be integer"}
+	}
+
 	return &EqualityJoin{leftField, rightField, &left, &right, maxBufferSize}, nil
 }
 
-// Return a TupleDesc for this join. The returned descriptor should contain the
+// Descriptor Return a TupleDesc for this join. The returned descriptor should contain the
 // union of the fields in the descriptors of the left and right operators.
 //
 // HINT: use [TupleDesc.merge].
-func (hj *EqualityJoin) Descriptor() *TupleDesc {
-	// TODO: some code goes here
-	return &TupleDesc{} // replace me
+func (joinOp *EqualityJoin) Descriptor() *TupleDesc {
+	left := *joinOp.left
+	right := *joinOp.right
+	return left.Descriptor().merge(right.Descriptor())
 }
 
-// Join operator implementation. This function should iterate over the results
+// Iterator Join operator implementation. This function should iterate over the results
 // of the join. The join should be the result of joining joinOp.left and
 // joinOp.right, applying the joinOp.leftField and joinOp.rightField expressions
 // to the tuples of the left and right iterators respectively, and joining them
@@ -49,7 +53,126 @@ func (hj *EqualityJoin) Descriptor() *TupleDesc {
 // maxBufferSize records, and should pass the testBigJoin test without timing
 // out. To pass this test, you will need to use something other than a nested
 // loops join.
-func (joinOp *EqualityJoin) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
-	// TODO: some code goes here
-	return nil, fmt.Errorf("EqualityJoin.Iterator not implemented") // replace me
+func (joinOp *EqualityJoin) Iterator(tid TransactionID) (iterFunc func() (*Tuple, error), err error) {
+	left := *joinOp.left
+	right := *joinOp.right
+
+	leftIter, err := left.Iterator(tid)
+	if err != nil {
+		DPrintf("EqualityJoin Iterator get left iterator err: %v", err)
+		return
+	}
+
+	var (
+		reset        = true
+		leftScanEnd  bool
+		joinBufMap   map[int64][]*Tuple
+		rightIter    func() (*Tuple, error)
+		validTupleCh chan *Tuple
+	)
+	iterFunc = func() (reply *Tuple, err error) {
+		if len(validTupleCh) > 0 {
+			// has valid reply
+			return <-validTupleCh, nil
+		}
+
+		var (
+			rightTuple  *Tuple
+			rightTmpVal DBValue
+			rVal        IntField
+			matchTuples []*Tuple
+		)
+		for {
+			if reset {
+				if leftScanEnd {
+					return
+				}
+
+				joinBufMap, err = joinOp.fillJoinBufMap(leftIter, &leftScanEnd)
+				if err != nil {
+					return
+				}
+
+				rightIter, err = right.Iterator(tid)
+				if err != nil {
+					DPrintf("EqualityJoin Iterator get right iterator err: %v", err)
+					return
+				}
+				reset = false
+			}
+
+			for {
+				rightTuple, err = rightIter()
+				if err != nil {
+					DPrintf("EqualityJoin rightIter() err: %v", err)
+					return
+				}
+				if rightTuple == nil {
+					break
+				}
+
+				rightTmpVal, err = joinOp.rightField.EvalExpr(rightTuple)
+				if err != nil {
+					DPrintf("EqualityJoin leftField EvalExpr err: %v", err)
+					return
+				}
+
+				rVal = rightTmpVal.(IntField)
+				matchTuples = joinBufMap[rVal.Value]
+				if len(matchTuples) == 0 {
+					continue
+				}
+
+				validTupleCh = make(chan *Tuple, len(matchTuples))
+				for _, tuple := range matchTuples {
+					validTupleCh <- joinTuples(tuple, rightTuple)
+				}
+				reply = <-validTupleCh
+				return
+			}
+
+			reset = true
+		}
+	}
+
+	return
+}
+
+// hash join:
+// Choose the bigger or has index table to be-driven table.
+// Fill the driver table fill into memory hash table(cap most maxBufferSize).
+// Iterate through the be-driven table and check each tuple in memory hash table.
+// If the be-driven table has been iter end, re fill the hash table by iter driver table.
+// Return until the driver table has been iter end.
+func (joinOp *EqualityJoin) fillJoinBufMap(leftIter func() (*Tuple, error), leftScanEnd *bool) (joinBufMap map[int64][]*Tuple, err error) {
+	var (
+		tmpTuple *Tuple
+		tmpVal   DBValue
+		val      IntField
+	)
+	joinBufMap = make(map[int64][]*Tuple, joinOp.maxBufferSize)
+	for i := 0; i < joinOp.maxBufferSize; i++ {
+		tmpTuple, err = leftIter()
+		if err != nil {
+			DPrintf("EqualityJoin leftIter() err: %v", err)
+			return
+		}
+		if tmpTuple == nil {
+			DPrintf("EqualityJoin leftIter tuple first nil")
+			*leftScanEnd = true
+			break
+		}
+
+		tmpVal, err = joinOp.leftField.EvalExpr(tmpTuple)
+		if err != nil {
+			DPrintf("EqualityJoin leftField EvalExpr err: %v", err)
+			return
+		}
+
+		val = tmpVal.(IntField)
+
+		joinBufMap[val.Value] = append(joinBufMap[val.Value], tmpTuple)
+	}
+
+	return
 }

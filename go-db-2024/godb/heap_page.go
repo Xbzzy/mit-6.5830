@@ -100,8 +100,11 @@ func (h *heapPage) insertTuple(t *Tuple) (id recordID, err error) {
 		}
 
 		id = getRecordID(h.pageNo, index)
-		t.Rid = id
-		h.tuples[index] = t
+		h.tuples[index] = &Tuple{
+			Desc:   t.Desc,
+			Fields: t.Fields,
+			Rid:    id,
+		}
 		h.slotUsed++
 		h.dirty = true
 		break

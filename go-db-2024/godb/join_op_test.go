@@ -63,6 +63,7 @@ func TestJoin(t *testing.T) {
 		t.Errorf("unexpected number of t2 results (%d, expected 4)", cntOut2)
 	}
 
+	os.Remove(JoinTestFile)
 }
 
 const BigJoinFile1 string = "jointest1.dat"
@@ -183,6 +184,9 @@ func TestJoinBigOptional(t *testing.T) {
 		t.Fatal("Test didn't finish in time")
 	case <-done:
 	}
+
+	os.Remove(BigJoinFile1)
+	os.Remove(BigJoinFile2)
 }
 
 func makeJoinOrderingVars(t *testing.T) (*HeapFile, *HeapFile, Tuple, Tuple, *BufferPool) {
@@ -294,6 +298,9 @@ func TestJoinFieldOrder(t *testing.T) {
 	if !tdExpected.equals(&tj.Desc) {
 		t.Fatalf("Unexpected descriptor of joined tuple")
 	}
+
+	os.Remove(TestingFile)
+	os.Remove(TestingFile2)
 }
 
 func TestJoinTupleNil(t *testing.T) {
