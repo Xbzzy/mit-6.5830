@@ -58,4 +58,6 @@ func TestInsert(t *testing.T) {
 	if cnt != 2 {
 		t.Errorf("insert failed, expected 2 tuples, got %d", cnt)
 	}
+
+	os.Remove(InsertTestFile)
 }

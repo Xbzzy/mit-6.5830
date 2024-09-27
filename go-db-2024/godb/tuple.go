@@ -53,7 +53,7 @@ func (td *TupleDesc) equals(d2 *TupleDesc) bool {
 	}
 
 	for index, field := range td.Fields {
-		if field != d2.Fields[index] {
+		if field.Fname != d2.Fields[index].Fname || field.Ftype != d2.Fields[index].Ftype {
 			return false
 		}
 	}
@@ -150,6 +150,10 @@ func getRecordID(pageNo, slot int) recordID {
 }
 
 func splitRecordID(id recordID) (pageNo, slot int) {
+	if id == nil {
+		return
+	}
+
 	str := id.(string)
 	strSlice := strings.Split(str, "-")
 	pageNo, _ = strconv.Atoi(strSlice[0])

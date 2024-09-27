@@ -19,9 +19,6 @@ func NewJoin(left Operator, leftField Expr, right Operator, rightField Expr, max
 	if leftField == nil || rightField == nil {
 		return nil, GoDBError{TypeMismatchError, "leftField and rightField must be non-nil"}
 	}
-	if leftField.GetExprType().Ftype != IntType || rightField.GetExprType().Ftype != IntType {
-		return nil, GoDBError{TypeMismatchError, "leftField and rightField must be integer"}
-	}
 
 	return &EqualityJoin{leftField, rightField, &left, &right, maxBufferSize}, nil
 }
@@ -66,7 +63,7 @@ func (joinOp *EqualityJoin) Iterator(tid TransactionID) (iterFunc func() (*Tuple
 	var (
 		reset        = true
 		leftScanEnd  bool
-		joinBufMap   map[int64][]*Tuple
+		joinBufMap   map[any][]*Tuple
 		rightIter    func() (*Tuple, error)
 		validTupleCh chan *Tuple
 	)
@@ -79,7 +76,6 @@ func (joinOp *EqualityJoin) Iterator(tid TransactionID) (iterFunc func() (*Tuple
 		var (
 			rightTuple  *Tuple
 			rightTmpVal DBValue
-			rVal        IntField
 			matchTuples []*Tuple
 		)
 		for {
@@ -117,8 +113,7 @@ func (joinOp *EqualityJoin) Iterator(tid TransactionID) (iterFunc func() (*Tuple
 					return
 				}
 
-				rVal = rightTmpVal.(IntField)
-				matchTuples = joinBufMap[rVal.Value]
+				matchTuples = joinBufMap[rightTmpVal]
 				if len(matchTuples) == 0 {
 					continue
 				}
@@ -144,13 +139,12 @@ func (joinOp *EqualityJoin) Iterator(tid TransactionID) (iterFunc func() (*Tuple
 // Iterate through the be-driven table and check each tuple in memory hash table.
 // If the be-driven table has been iter end, re fill the hash table by iter driver table.
 // Return until the driver table has been iter end.
-func (joinOp *EqualityJoin) fillJoinBufMap(leftIter func() (*Tuple, error), leftScanEnd *bool) (joinBufMap map[int64][]*Tuple, err error) {
+func (joinOp *EqualityJoin) fillJoinBufMap(leftIter func() (*Tuple, error), leftScanEnd *bool) (joinBufMap map[any][]*Tuple, err error) {
 	var (
 		tmpTuple *Tuple
 		tmpVal   DBValue
-		val      IntField
 	)
-	joinBufMap = make(map[int64][]*Tuple, joinOp.maxBufferSize)
+	joinBufMap = make(map[any][]*Tuple, joinOp.maxBufferSize)
 	for i := 0; i < joinOp.maxBufferSize; i++ {
 		tmpTuple, err = leftIter()
 		if err != nil {
@@ -169,10 +163,15 @@ func (joinOp *EqualityJoin) fillJoinBufMap(leftIter func() (*Tuple, error), left
 			return
 		}
 
-		val = tmpVal.(IntField)
-
-		joinBufMap[val.Value] = append(joinBufMap[val.Value], tmpTuple)
+		joinBufMap[tmpVal] = append(joinBufMap[tmpVal], tmpTuple)
 	}
 
 	return
+}
+
+func buildTupleTable(tuple *Tuple, exp Expr) {
+	expType := exp.GetExprType()
+	for index := range tuple.Desc.Fields {
+		tuple.Desc.Fields[index].TableQualifier = expType.TableQualifier
+	}
 }

@@ -19,6 +19,7 @@ type HeapFile struct {
 	// HeapFile should include the fields below;  you may want to add
 	// additional fields
 	fromFile  string
+	file      *os.File
 	desc      *TupleDesc
 	bufPool   *BufferPool
 	idlePage  map[int]struct{}
@@ -188,6 +189,13 @@ func (f *HeapFile) readPage(pageNo int) (Page, error) {
 //
 // The page the tuple is inserted into should be marked as dirty.
 func (f *HeapFile) insertTuple(t *Tuple, tid TransactionID) (err error) {
+	if len(t.Desc.Fields) != len(t.Fields) {
+		return GoDBError{IllegalOperationError, "invalid tuple"}
+	}
+	if !f.desc.equals(&t.Desc) {
+		return GoDBError{TypeMismatchError, "tuple desc not match"}
+	}
+
 	var (
 		reply     Page
 		tmpPage   *heapPage
@@ -283,15 +291,16 @@ func (f *HeapFile) deleteTuple(t *Tuple, tid TransactionID) (err error) {
 // disk (e.g., that it is the ith page in the heap file), so you can determine
 // where to write it back.
 func (f *HeapFile) flushPage(p Page) (err error) {
-	file, err := os.OpenFile(f.fromFile, os.O_CREATE|os.O_RDWR, 0666)
-	if err != nil {
-		DPrintf("HeapFile path:%s flushPage OpenFile err:%v", f.fromFile, err)
-		return
+	if f.file == nil {
+		f.file, err = os.OpenFile(f.fromFile, os.O_CREATE|os.O_RDWR, 0666)
+		if err != nil {
+			DPrintf("HeapFile path:%s flushPage OpenFile err:%v", f.fromFile, err)
+			return
+		}
 	}
-	defer file.Close()
 
 	page := p.(*heapPage)
-	_, err = file.Seek(int64(page.pageNo*PageSize), io.SeekStart)
+	_, err = f.file.Seek(int64(page.pageNo*PageSize), io.SeekStart)
 	if err != nil {
 		DPrintf("HeapFile path:%s flushPage Seek err:%v", f.fromFile, err)
 		return
@@ -303,7 +312,7 @@ func (f *HeapFile) flushPage(p Page) (err error) {
 		return
 	}
 
-	_, err = buf.WriteTo(file)
+	_, err = buf.WriteTo(f.file)
 	if err != nil {
 		DPrintf("HeapFile path:%s flushPage WriteTo err:%v", f.fromFile, err)
 		return

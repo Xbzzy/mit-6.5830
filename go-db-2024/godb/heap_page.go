@@ -100,8 +100,9 @@ func (h *heapPage) insertTuple(t *Tuple) (id recordID, err error) {
 		}
 
 		id = getRecordID(h.pageNo, index)
+		t.Rid = id
 		h.tuples[index] = &Tuple{
-			Desc:   t.Desc,
+			Desc:   *h.desc,
 			Fields: t.Fields,
 			Rid:    id,
 		}
