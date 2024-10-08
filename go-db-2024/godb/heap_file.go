@@ -336,6 +336,8 @@ func (f *HeapFile) Descriptor() *TupleDesc {
 // transactions
 // You should esnure that Tuples returned by this method have their Rid object
 // set appropriate so that [deleteTuple] will work (see additional comments there).
+// Make sure to set the returned tuple's TupleDescriptor to the TupleDescriptor of
+// the HeapFile. This allows it to correctly capture the table qualifier.
 func (f *HeapFile) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
 	var iterIndex int
 	tupleIterMap := make(map[int]func() (*Tuple, error))
@@ -364,6 +366,7 @@ func (f *HeapFile) Iterator(tid TransactionID) (func() (*Tuple, error), error) {
 				continue
 			}
 
+			tuple.Desc = *f.desc
 			return
 		}
 

@@ -113,7 +113,7 @@ func (c *Catalog) parseCatalogFile() error {
 			}
 
 			name := nameType[0]
-			fieldType := FieldType{name, tableName, IntType} // whether the tableQualifier needs to be populated?
+			fieldType := FieldType{name, "", IntType} // whether the tableQualifier needs to be populated?
 			switch nameType[1] {
 			case "int":
 				fallthrough
